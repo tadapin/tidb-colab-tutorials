@@ -800,7 +800,7 @@ def build_04_fts() -> dict:
         """),
         code("insert", """
             POSTS = [
-                ("ja", "分散トランザクションの基礎",        "TiDB ではパッケージ化されたトランザクションが ACID で動作します。コミット時に TSO から一意のタイムスタンプを取得し、Percolator に基づいた 2 フェーズコミットを行います。"),
+                ("ja", "分散トランザクションの基礎",        "TiDB の分散トランザクションは ACID で動作します。コミット時に TSO から一意のタイムスタンプを取得し、Percolator を参考にした 2 フェーズコミットで複数ノードにまたがる整合性を実現します。"),
                 ("ja", "ベクトル検索を始めよう",            "ベクトル検索は意味的な近さでドキュメントを取り出す技術です。TiDB は VECTOR 型と HNSW インデックスを提供します。"),
                 ("ja", "全文検索の使いどころ",              "キーワードが一致する文書を素早く取り出したい時は全文検索が向きます。商品カタログや FAQ のような用途で特に有効です。"),
                 ("ja", "PyTiDB でレシピ RAG を作る",        "レシピデータをベクトル化し、ユーザーの質問に近いレシピを引っ張り出して LLM に渡すと、簡単に RAG アプリが作れます。"),
@@ -1685,12 +1685,23 @@ def build_10_image_search() -> dict:
                     self.__dict__["_model"] = CLIPModel.from_pretrained(model_name)
                     self.__dict__["_processor"] = CLIPProcessor.from_pretrained(model_name)
 
+                @staticmethod
+                def _to_tensor(out):
+                    # transformers のバージョンによっては tensor ではなく出力オブジェクトが返る
+                    if hasattr(out, "cpu"):
+                        return out
+                    for attr in ("text_embeds", "image_embeds", "pooler_output", "last_hidden_state"):
+                        v = getattr(out, attr, None)
+                        if v is not None and hasattr(v, "cpu"):
+                            return v
+                    raise TypeError(f"Cannot extract tensor from CLIP output: {type(out).__name__}")
+
                 def _encode_text(self, texts: List[str]) -> List[List[float]]:
                     proc = self.__dict__["_processor"]
                     model = self.__dict__["_model"]
                     with torch.no_grad():
                         inputs = proc(text=texts, return_tensors="pt", padding=True, truncation=True)
-                        features = model.get_text_features(**inputs)
+                        features = self._to_tensor(model.get_text_features(**inputs))
                     return [row.tolist() for row in features.cpu().numpy()]
 
                 def _encode_images(self, images) -> List[List[float]]:
@@ -1698,7 +1709,7 @@ def build_10_image_search() -> dict:
                     model = self.__dict__["_model"]
                     with torch.no_grad():
                         inputs = proc(images=images, return_tensors="pt")
-                        features = model.get_image_features(**inputs)
+                        features = self._to_tensor(model.get_image_features(**inputs))
                     return [row.tolist() for row in features.cpu().numpy()]
 
                 def get_query_embedding(self, query: Any, source_type: Optional[str] = "text", **kwargs) -> List[float]:
