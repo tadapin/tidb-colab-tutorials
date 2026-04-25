@@ -210,3 +210,6 @@ __marimo__/
 ref/
 .omc/
 
+# Test results (per-environment, not committed)
+*_TEST_RESULT.md
+
