@@ -1625,23 +1625,23 @@ def build_10_image_search() -> dict:
     cells = [
         md("badge", f"{colab_badge(name)}"),
         md("title", """
-            # 画像検索 / CLIP + pytidb
+            # 画像検索 / CLIP + pytidb (auto-embedding 版)
 
-            このノートブックは **pytidb シリーズの第 10 回** です。OpenAI の CLIP (ViT-B/32) を使って画像を 512 次元のベクトルに変換し、TiDB で類似画像を検索します。
+            このノートブックは **pytidb シリーズの第 10 回** です。OpenAI の CLIP (ViT-B/32) を pytidb の **auto-embedding API** に接続し、TiDB で画像検索を行います。
 
-            参考: [tidb-vector-python `image_search/example.ipynb`](https://github.com/pingcap/tidb-vector-python/blob/main/examples/image_search/example.ipynb) を pytidb ベースに書き直したものです。
+            参考: [pytidb `examples/image_search/app.py`](https://github.com/pingcap/pytidb/blob/main/examples/image_search/app.py) の構成を、Colab 無料枠で動くよう CLIP 置き換えで再構築したものです。
 
             ## 学習目標
-            - CLIP で **画像とテキストを同じ 512 次元ベクトル空間**に埋め込む
-            - 独自 `BaseEmbeddingFunction` をマルチモーダル (`source_type="image"` / `"text"`) に対応させる
-            - 画像ベクトルを TiDB の `VECTOR(512)` に保存する
-            - **テキスト→画像** 検索 (例: "dog" で犬の写真を引く)
-            - **画像→画像** 検索 (クエリ画像から類似画像を引く)
+            - `BaseEmbeddingFunction` を継承し、`source_type="text"` / `"image"` の両方に対応したマルチモーダル埋め込みクラスを書く
+            - `VectorField(source_field="image_uri", source_type="image")` で **画像の auto-embedding 列**を宣言する
+            - 画像は **`file://` URI** として TiDB に保存し、pytidb に embed を任せる (`table.bulk_insert` のみで OK)
+            - 同じ VectorField に対して **テキスト→画像 検索**と **画像→画像 検索** を両方実行する
+              - pytidb は `source_type="image"` を常に `get_query_embedding` に渡すが、我々の wrapper 側で入力型から auto-dispatch する
 
             ## 注意
-            - CLIP ViT-B/32 は **英語**のテキストに最適化されたモデルです。クエリ文は英語で書いてください (日本語は精度が大きく落ちます)
-            - 初回のみモデル DL が走ります (約 150 MB)、Colab の無料枠 (CPU ランタイム) で数十秒〜1 分程度
-            - API キーは不要
+            - CLIP ViT-B/32 は **英語**のテキストに最適化されたモデルです。クエリ文は英語で書いてください
+            - 初回のみ CLIP DL が走ります (約 150 MB)、Colab の無料枠 (CPU ランタイム) で数十秒〜1 分程度
+            - API キーは不要 (CLIP はローカル推論)
 
             前提: `09_custom_embedding.ipynb` を実行済みだと構造が分かりやすいです。
         """),
@@ -1654,20 +1654,60 @@ def build_10_image_search() -> dict:
         md("step2", "## 2. TiDB Cloud Zero の払い出し"),
         code("provision", provision_code(tag="pytidb-image-search")),
         md("step3", """
-            ## 3. CLIP モデルを読み込む + pytidb 用のマルチモーダル埋め込みクラス
+            ## 3. URI / PIL 両対応のマルチモーダル CLIP クラス
 
-            `BaseEmbeddingFunction` を継承し、`source_type` に応じて画像・テキストの両方に対応します。
-            内部で `transformers` の `CLIPModel.get_image_features` / `get_text_features` を呼ぶだけ。
+            `BaseEmbeddingFunction` を継承し、**auto-embedding の流儀**に合わせます:
+
+            - `get_source_embedding(s)`: insert 時に `image_uri` 列の文字列が渡ってくる → `source_type="image"` で画像として読み込む
+            - `get_query_embedding`: 検索時、`source_type` は VectorField の宣言値 (`"image"`) が固定で渡るので、**実入力の型から auto-dispatch** (PIL.Image / URI 文字列 → 画像エンコーダ、普通の文字列 → テキストエンコーダ)
+
+            `_load_image()` は `file://` / `http(s)://` / ローカルパス / PIL.Image のどれでも受けて PIL に正規化します。
         """),
         code("clip_class", """
+            import io
+            import urllib.request
+            from pathlib import Path
             from typing import Any, List, Optional
+
+            import requests
             import torch
             from PIL import Image
+            from PIL.Image import Image as PILImage
             from transformers import CLIPModel, CLIPProcessor
             from pytidb.embeddings.base import BaseEmbeddingFunction
 
             CLIP_MODEL = "openai/clip-vit-base-patch32"
             CLIP_DIM = 512
+            IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif")
+
+
+            def _load_image(src: Any) -> PILImage:
+                \"\"\"PIL.Image / Path / str (file:// / http(s):// / plain path) を RGB PIL に正規化\"\"\"
+                if isinstance(src, PILImage):
+                    return src.convert("RGB")
+                if isinstance(src, Path):
+                    return Image.open(src).convert("RGB")
+                if isinstance(src, str):
+                    if src.startswith("file://"):
+                        path = urllib.request.url2pathname(src[len("file://"):])
+                        return Image.open(path).convert("RGB")
+                    if src.startswith(("http://", "https://")):
+                        data = requests.get(src, timeout=10).content
+                        return Image.open(io.BytesIO(data)).convert("RGB")
+                    return Image.open(src).convert("RGB")
+                raise TypeError(f"unsupported image source: {type(src).__name__}")
+
+
+            def _is_image_like(x: Any) -> bool:
+                \"\"\"入力が画像と判断できるか\"\"\"
+                if isinstance(x, (PILImage, Path)):
+                    return True
+                if isinstance(x, str):
+                    if x.startswith(("file://", "http://", "https://")):
+                        return True
+                    if any(x.lower().endswith(ext) for ext in IMAGE_EXTS):
+                        return True
+                return False
 
 
             class CLIPEmbedding(BaseEmbeddingFunction):
@@ -1681,13 +1721,12 @@ def build_10_image_search() -> dict:
                         use_server=False,
                         **kwargs,
                     )
-                    # HF からモデルと processor をロード (初回のみ DL)
                     self.__dict__["_model"] = CLIPModel.from_pretrained(model_name)
                     self.__dict__["_processor"] = CLIPProcessor.from_pretrained(model_name)
 
                 @staticmethod
                 def _to_tensor(out):
-                    # transformers のバージョンによっては tensor ではなく出力オブジェクトが返る
+                    # transformers のバージョン差を吸収 (tensor / BaseModelOutputWithPooling 両対応)
                     if hasattr(out, "cpu"):
                         return out
                     for attr in ("text_embeds", "image_embeds", "pooler_output", "last_hidden_state"):
@@ -1707,17 +1746,16 @@ def build_10_image_search() -> dict:
                 def _encode_images(self, images) -> List[List[float]]:
                     proc = self.__dict__["_processor"]
                     model = self.__dict__["_model"]
+                    pil_images = [_load_image(im) for im in images]
                     with torch.no_grad():
-                        inputs = proc(images=images, return_tensors="pt")
+                        inputs = proc(images=pil_images, return_tensors="pt")
                         features = self._to_tensor(model.get_image_features(**inputs))
                     return [row.tolist() for row in features.cpu().numpy()]
 
-                def get_query_embedding(self, query: Any, source_type: Optional[str] = "text", **kwargs) -> List[float]:
-                    if source_type == "image":
-                        return self._encode_images([query])[0]
-                    return self._encode_text([str(query)])[0]
+                # pytidb が呼ぶ 3 つのエントリポイント
 
                 def get_source_embedding(self, source: Any, source_type: Optional[str] = "text", **kwargs) -> List[float]:
+                    # insert 時: source は image_uri 列の文字列 (VectorField.source_type="image" で固定)
                     if source_type == "image":
                         return self._encode_images([source])[0]
                     return self._encode_text([str(source)])[0]
@@ -1727,18 +1765,26 @@ def build_10_image_search() -> dict:
                         return self._encode_images(sources)
                     return self._encode_text([str(s) for s in sources])
 
+                def get_query_embedding(self, query: Any, source_type: Optional[str] = "text", **kwargs) -> List[float]:
+                    # 検索時: source_type は "image" で常に固定なので実入力から auto-dispatch する
+                    if _is_image_like(query):
+                        return self._encode_images([query])[0]
+                    return self._encode_text([str(query)])[0]
+
 
             embed_fn = CLIPEmbedding()
             print("CLIP ready  dim =", embed_fn.dimensions)
         """),
         md("step4", """
-            ## 4. テーブルを作成する
+            ## 4. テーブル定義 (auto-embedding 列)
 
-            画像を直接 TiDB に格納する代わりに、**画像 ID とベクトル**だけ保存して、画像本体は Python 側のリストから参照する構成にします (参考ノートブックと同じ)。
+            `image_uri` 列に `file://` URI 文字列を入れ、`image_vec` は **`source_field="image_uri"`** + **`source_type="image"`** で自動生成させます。
+            この瞬間、insert のときに pytidb が `embed_fn.get_source_embeddings(uris, source_type="image")` を呼び出す経路が出来上がります。
         """),
         code("schema", """
             from pytidb import TiDBClient
-            from pytidb.schema import Field, TableModel, VectorField
+            from pytidb.datatype import TEXT
+            from pytidb.schema import Field, TableModel
 
             db = TiDBClient.connect(
                 host=conn["host"],
@@ -1750,40 +1796,50 @@ def build_10_image_search() -> dict:
             )
 
 
-            class ImageVec(TableModel):
-                __tablename__ = "image_vectors"
+            class ImageRecord(TableModel):
+                __tablename__ = "image_records"
                 __table_args__ = {"extend_existing": True}
 
                 id: int = Field(primary_key=True)
-                image_id: int = Field()         # 画像本体はメモリ中のリスト image_pool[image_id]
-                label: str = Field()            # ImageNet ラベル (可読用)
-                embedding: list[float] = VectorField(dimensions=CLIP_DIM)
+                label: str = Field()
+                image_uri: str = Field(sa_type=TEXT)                    # file:// URI を格納
+                image_vec: list[float] = embed_fn.VectorField(
+                    source_field="image_uri",
+                    source_type="image",
+                )
 
 
-            table = db.create_table(schema=ImageVec, if_exists="overwrite")
+            table = db.create_table(schema=ImageRecord, if_exists="overwrite")
             print("テーブル準備OK:", table.table_name)
         """),
         md("step5", """
-            ## 5. サンプル画像をロードする
+            ## 5. サンプル画像をロード + 画像をローカル保存
 
-            `datasets` から ImageNet tiny を取得します (参考ノートブックと同じ `theodor1289/imagenet-1k_tiny`)。
-            先頭 20 枚だけ使います。
+            `datasets` から ImageNet tiny を 20 枚取得し、Colab のローカルに `.jpg` として保存して `file://` URI を作ります。
+            (pytidb の組み込み multimodal example と同じ方式です)
         """),
         code("dataset", """
+            import os
             import datasets
 
+            IMG_DIR = "/content/img_pool"
+            os.makedirs(IMG_DIR, exist_ok=True)
+
             ds = datasets.load_dataset("theodor1289/imagenet-1k_tiny", split="train")
-            image_pool = []        # [PIL.Image]
-            labels_pool = []       # [str]
+
+            records = []     # [(id, label, image_uri, PIL.Image)] for preview/reference
             for i, row in enumerate(ds):
                 if i >= 20:
                     break
-                image_pool.append(row["image"].convert("RGB"))
-                # 列名はデータセットによって違う可能性あり
-                label = row.get("label", row.get("fine_label", "unknown"))
-                labels_pool.append(str(label))
+                img = row["image"].convert("RGB")
+                label = str(row.get("label", row.get("fine_label", "unknown")))
+                path = os.path.abspath(os.path.join(IMG_DIR, f"{i:03d}.jpg"))
+                img.save(path, "JPEG")
+                uri = f"file://{path}"
+                records.append((i + 1, label, uri, img))
 
-            print(f"loaded {len(image_pool)} images")
+            print(f"saved {len(records)} images to {IMG_DIR}")
+            print("example URI:", records[0][2])
         """),
         md("step5b", "### 画像をインラインで確認する"),
         code("preview", """
@@ -1804,19 +1860,22 @@ def build_10_image_search() -> dict:
                 plt.show()
 
 
-            show_grid(image_pool[:20], titles=[f"#{i}" for i in range(len(image_pool[:20]))])
+            show_grid(
+                [r[3] for r in records],
+                titles=[f"#{r[0]} {r[1]}" for r in records],
+            )
         """),
         md("step6", """
-            ## 6. 画像をベクトル化して TiDB に保存する
+            ## 6. bulk_insert だけで自動埋め込み
 
-            `embed_fn.get_source_embeddings(images, source_type="image")` で一括エンコードします。
+            `ImageRecord(id, label, image_uri)` を 20 件まとめて `table.bulk_insert(...)` に渡すと、pytidb が内部で
+            `embed_fn.get_source_embeddings([uri, uri, ...], source_type="image")` を呼び、画像を CLIP で 512 次元にしてから `image_vec` 列に書き込みます。
+            **手動で `get_source_embeddings` を呼ぶ必要はありません。**
         """),
         code("ingest", """
-            image_vectors = embed_fn.get_source_embeddings(image_pool, source_type="image")
-
             rows = [
-                ImageVec(id=i + 1, image_id=i, label=labels_pool[i], embedding=image_vectors[i])
-                for i in range(len(image_pool))
+                ImageRecord(id=rid, label=label, image_uri=uri)
+                for (rid, label, uri, _) in records
             ]
             table.bulk_insert(rows)
             print(f"投入完了: {table.rows()} 件")
@@ -1824,48 +1883,45 @@ def build_10_image_search() -> dict:
         md("step7", """
             ## 7. テキスト → 画像 検索
 
-            検索クエリ文字列を CLIP の **テキストエンコーダ**に通すと、画像ベクトルと同じ空間の 512 次元ベクトルが得られます。
-            それを `table.search(vec)` に直接渡すだけ。
+            `table.search("a photo of a dog")` をそのまま呼ぶだけ。pytidb は自動で `get_query_embedding` を呼び、我々の wrapper が **テキスト入力** を検出してテキストエンコーダを使います。
         """),
         code("text_search", """
             QUERIES = ["a photo of a dog", "sushi on a plate", "a classic sports car"]
 
             for q in QUERIES:
-                qvec = embed_fn.get_query_embedding(q, source_type="text")
-                hits = table.search(qvec).limit(5).to_pydantic()
+                hits = table.search(q).limit(5).to_pydantic()
                 print(f"\\n=== query: {q!r} ===")
-                imgs = [image_pool[h.hit.image_id] for h in hits]
+                imgs = [_load_image(h.hit.image_uri) for h in hits]
                 titles = [f"sim={h.similarity_score:.3f}\\n[{h.hit.label}]" for h in hits]
                 show_grid(imgs, titles=titles, cols=5)
         """),
         md("step8", """
             ## 8. 画像 → 画像 検索
 
-            CLIP の画像エンコーダで得たベクトルを検索側に渡せば、**類似画像検索**になります。
-            クエリ画像はデータセット内の 1 枚を流用しても、外部 URL からロードしても OK。
+            検索対象にも `table.search(pil_image)` と PIL Image を直接渡せます。wrapper が `PIL.Image` を検出して画像エンコーダを使います。
+            top-1 は必ずクエリ自身 (sim≈1.0) になります。
         """),
         code("image_search", """
             # データセット先頭の 1 枚をクエリにする
-            query_image = image_pool[0]
+            query_image = records[0][3]
             print("Query image:")
             show_grid([query_image], titles=["query"], cols=1)
 
-            qvec = embed_fn.get_query_embedding(query_image, source_type="image")
-            hits = table.search(qvec).limit(5).to_pydantic()
+            hits = table.search(query_image).limit(5).to_pydantic()
 
             print("\\n=== top-5 similar images ===")
-            imgs = [image_pool[h.hit.image_id] for h in hits]
+            imgs = [_load_image(h.hit.image_uri) for h in hits]
             titles = [f"sim={h.similarity_score:.3f}\\n[{h.hit.label}]" for h in hits]
             show_grid(imgs, titles=titles, cols=5)
         """),
         md("next", """
             ## 追加実験
 
-            - `QUERIES` に自分で考えた英語フレーズを追加して上位 5 枚がどう動くか確認
-            - 外部画像 URL を `requests.get` + `PIL.Image.open(io.BytesIO(...))` で読み込み、画像→画像検索のクエリにする
-            - `limit(10)` にしたり `distance_threshold(0.5)` を挟んで、閾値で絞ってみる
-            - CLIP を **`openai/clip-vit-large-patch14`** (約 900 MB、768 次元) に差し替えて精度の違いを比較 (ただし Colab 無料枠だと重め)
-            - 多言語で検索したい場合は `sentence-transformers/clip-ViT-B-32-multilingual-v1` に置き換えて再構築
+            - `table.search("...")` / `table.search(pil_image)` のどちらでも **同じ image_vec 列**が使われていることを確認
+            - `QUERIES` に英語フレーズを追加 / 外部画像 URL (`https://...`) を直接 `table.search(url)` に渡す (wrapper 側で自動ロード)
+            - `table.search(...).distance_threshold(0.5).limit(10)` で閾値による足切り
+            - CLIP を **`openai/clip-vit-large-patch14`** (約 900 MB、768 次元) に差し替え → `CLIP_DIM = 768` に注意
+            - **真の multimodal auto-embedding** として pytidb 組み込みの `EmbeddingFunction("jina_ai/jina-embeddings-v4", multimodal=True)` を試す場合は `JINA_AI_API_KEY` を `os.environ` にセット (有料)
         """),
     ]
     return build_notebook(cells)

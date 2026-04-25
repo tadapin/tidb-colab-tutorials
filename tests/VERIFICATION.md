@@ -122,17 +122,22 @@
   - 「どれくらいで届きますか?」→ 商品が届かないときは の FAQ が top
 - 日本語だけで検索ができている = 多言語モデルが機能している
 
-## 10_image_search
+## 10_image_search (auto-embedding 版)
 
 - 初回 DL: CLIP (~150 MB) + ImageNet tiny データセット (~20 MB)
 - `CLIP ready  dim = 512`
+- `/content/img_pool/` に 20 枚の `.jpg` が保存され、`example URI: file:///content/img_pool/000.jpg` のような出力
 - 20 枚の画像がグリッド表示される
-- `投入完了: 20 件`
-- **テキスト→画像** 3 クエリ:
+- **`投入完了: 20 件`** — ここで `table.bulk_insert(rows)` のみ実行。pytidb が内部で `embed_fn.get_source_embeddings([uri, ...], source_type="image")` を呼び、CLIP で 512 次元化して自動的に `image_vec` 列に書き込む (手動 embedding 不要)
+- **テキスト → 画像** `table.search("a photo of a dog").limit(5)` を直接呼ぶ:
   - `"a photo of a dog"` → 犬系の画像が上位
   - `"sushi on a plate"` → 食べ物系 (厳密に寿司じゃなくても OK、データセット次第)
   - `"a classic sports car"` → 車 or 乗り物系
-- **画像→画像**: クエリ画像 (データセット先頭) の類似が上位 5 枚、先頭は自分自身で sim ≈ 1.0
+  - wrapper 側で `_is_image_like("a photo of a dog") == False` と判定されテキストエンコーダが走る
+- **画像 → 画像** `table.search(pil_image).limit(5)` を直接呼ぶ:
+  - クエリ画像 (データセット先頭) の類似が上位 5 枚、先頭は自分自身で sim ≈ 1.0
+  - wrapper 側で `PIL.Image` を検出して画像エンコーダが走る
+- **同じ VectorField で両方向の検索ができる**ことが最大の確認ポイント
 
 ---
 
