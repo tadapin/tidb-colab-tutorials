@@ -35,9 +35,6 @@ TiDB + pytidb を Google Colab で体験するチュートリアル集です。
 
 ## 開発メモ
 
-- ノートブックの実体は `scripts/gen_notebooks.py` から生成しています。共通のプロビジョニング/ヘッダを含め、章ごとのソースはすべてこのスクリプト内にあります。
-  ```
-  python3 scripts/gen_notebooks.py
-  ```
-  これで `tutorials/` 配下の `.ipynb` がすべて再生成されます (`06_rag.ipynb` は手書きなので対象外)。
+- `tutorials/` 配下の `.ipynb` を直接編集してメンテナンスします。Colab で開くか、JupyterLab / VS Code でセルを編集してください。
+- 検証手順は [`tests/VERIFICATION.md`](tests/VERIFICATION.md) にまとめています。
 - 参考資料: [`ref/pytidb`](ref/pytidb) に pytidb 本体のサブモジュールが含まれています。
