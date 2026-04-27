@@ -7,7 +7,7 @@ TiDB + pytidb を Google Colab で体験するチュートリアル集です。
 
 - **Google Colab で動作** します (一部ノートブックは `google.colab.ai` を利用)
 - **API キー不要**: TiDB Cloud Zero + 組み込み埋め込み (Titan) + Colab AI で完結
-- **依存**: 原則 `!pip install -q pytidb` だけ (09 のみ `sentence-transformers` を追加)
+- **依存**: 原則 `!pip install -q pytidb` だけ (09/10 のみ 埋め込みモデルの追加インストール)
 - **使い捨てクラスタ**: TiDB Cloud Zero はサインアップ不要・30 日で自動削除。claim URL から TiDB Cloud Starter に移行すれば保持できます
 
 ## チュートリアル一覧
@@ -33,8 +33,3 @@ TiDB + pytidb を Google Colab で体験するチュートリアル集です。
 3. **応用編** (06 → 07 → 08): RAG・メモリ・Text2SQL に応用する
 4. **拡張** (09 → 10): 独自埋め込みでモデルを差し替える / CLIP で画像検索
 
-## 開発メモ
-
-- `tutorials/` 配下の `.ipynb` を直接編集してメンテナンスします。Colab で開くか、JupyterLab / VS Code でセルを編集してください。
-- 検証手順は [`tests/VERIFICATION.md`](tests/VERIFICATION.md) にまとめています。
-- 参考資料: [`ref/pytidb`](ref/pytidb) に pytidb 本体のサブモジュールが含まれています。
