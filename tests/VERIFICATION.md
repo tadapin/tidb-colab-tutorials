@@ -2,17 +2,26 @@
 
 各ノートブックを Colab で実行するときの **成功判定の目印** と **詰まったときの切り分け手順** をまとめたメモ。Claude と画面共有しながら流すと早い。
 
+リポジトリは **フレームワーク別に 2 系統**に分かれています:
+- `tutorials/pytidb/` (00〜10、11 本) — pytidb 公式 SDK 版
+- `tutorials/llamaindex/` (00〜01、2 本) — LlamaIndex の `TiDBVectorStore` 版
+
 ## 全体の準備
 
-- Colab は **CPU ランタイム** で十分 (06/07/08 の LLM 部分以外)
-- 08/09/10 は **GPU ランタイム** にしてもよいが、無くても動く (10 は CPU でも CLIP 推論可能)
-- 06/07/08 の `google.colab.ai` を使うセルは **Colab ログイン必須**
+- Colab は **CPU ランタイム** で十分 (pytidb 06/07/08 の LLM 部分以外)
+- pytidb 08/09/10 は **GPU ランタイム** にしてもよいが、無くても動く (10 は CPU でも CLIP 推論可能)
+- LLM を使うセル (`google.colab.ai`) は **Colab ログイン必須**
+- LlamaIndex 版は **ローカル実行**もサポート (LM Studio + OpenAI 互換 API)
 - TiDB Cloud Zero はサインアップ不要。1 ノートブック = 1 クラスタ作成
 
-**推奨順**: 00 → 01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10
+**pytidb 推奨順**: 00 → 01 → 02 → 03 → 04 → 05 → 06 → 07 → 08 → 09 → 10
 初めての場合は 00 + 03 + 06 + 10 の 4 本だけでも全体像が掴めます。
 
+**LlamaIndex 版**は pytidb 版 06 / 05 の知識を前提にした「同じ題材を別 SDK で組み直す」位置付け。pytidb 版を一通り回した後がおすすめ。
+
 ## 所要時間の目安
+
+### pytidb 版 (`tutorials/pytidb/`)
 
 | # | 時間 (累計) | 備考 |
 |---|---|---|
@@ -29,9 +38,16 @@
 | 10 | 5 分 | 初回 CLIP DL (~150 MB) + datasets DL |
 | 合計 | 約 35-45 分 | キャッシュ効けば再実行は半分 |
 
+### LlamaIndex 版 (`tutorials/llamaindex/`)
+
+| # | 時間 | 備考 |
+|---|---|---|
+| 00 | 4-5 分 | e5-small (~120MB) DL + LLM 推論 2 回 |
+| 01 | 5-7 分 | e5-small DL + FTS index の columnar replica 同期で~1 分待機 |
+
 ---
 
-# ノートブック別チェックリスト
+# pytidb 版チェックリスト
 
 ## 00_quickstart
 
@@ -141,6 +157,34 @@
 
 ---
 
+# LlamaIndex 版チェックリスト
+
+## llamaindex/00_rag
+
+- 初回 DL: `intfloat/multilingual-e5-small` (~120MB)
+- `embed_model: intfloat/multilingual-e5-small`
+- LLM 行: `LLM: google.colab.ai` (Colab) または `LLM: LM Studio (google/gemma-4-e2b)` (ローカル)
+- `Document 件数: 10`
+- `インデックス作成完了`
+- ベクトル検索ヒット top-1 が **霧氷豆腐の白湯がけ** (sim=0.85 前後)
+- `=== LLM 回答 ===` セクションで日本語の回答テキストが返る (例: 霧氷豆腐 / 白湯 / 和風 のいずれかが含まれる)
+- チャレンジ (火を使わない料理): 月光麻婆冷奴 / 海風ガスパチョ / 雪見みたらしクレープ のいずれかを提案
+
+## llamaindex/01_hybrid_search
+
+- `投入完了: 12 件`
+- `FTS index DDL 実行` 後 **`FTS インデックス利用可能まで待機中… 利用可能`** が出る (最大 180 秒待機、TiDB Cloud Zero では 60〜180 秒程度かかる)
+- ベクトル単独 vs 全文単独で順位が異なることを確認
+  - ベクトル top: `防水リュック 30L` / `撥水ライトシェルジャケット` のどちらかが top
+  - 全文 top: `撥水ライトシェルジャケット` (「雨」「通勤」が一致)
+- ハイブリッド (RRF): 上位 5 件で **重複なし** ★重要
+  - `撥水ライトシェルジャケット` が 1 回だけ登場 (vec/fts 両方でヒットするため最上位付近)
+- 重みを変えると並び順が動く (vec=0.7 でベクトル寄り、vec=0.3 でキーワード寄り)
+- メタデータフィルタ (outdoor/fashion): 5 件すべて outdoor または fashion
+- 確認のキモ: **同じテーブルに ALTER TABLE で FTS index を後付けし、自作 retriever で `fts_match_word` を呼べる**こと
+
+---
+
 # よくある失敗と切り分け
 
 ### ① TiDB Cloud Zero の払い出しで 429 / 503
@@ -174,6 +218,23 @@
 ### ⑧ 10 の画像が表示されない
 - matplotlib が inline バックエンドか確認 (`%matplotlib inline` を先頭セルに追加)
 - ランタイム再起動で直ることが多い
+
+### ⑨ LlamaIndex 版で `Connections using insecure transport are prohibited`
+- 接続文字列に `?ssl_verify_cert=true&ssl_verify_identity=true` が付いているか確認
+- 各ノートブックの `make_conn_str()` ヘルパが SSL 句を付ける実装
+
+### ⑩ LlamaIndex 版で FTS index 待機が timeout する (`継続するが検索が空になる可能性あり`)
+- TiDB Cloud Zero 側の columnar replica が遅れているだけ。timeout 後でも 1〜2 分待ってから再実行すれば取れることが多い
+- それでも空なら `ALTER TABLE products SET TIFLASH REPLICA 1;` を別途実行 → `INFORMATION_SCHEMA.TIFLASH_REPLICA` でレプリカが完成するまで待つ
+
+### ⑪ LlamaIndex のハイブリッド検索で同じ商品が 2 回出てくる
+- `TiDBFullTextRetriever` の `TextNode(id_=str(r.id), ...)` 指定が抜けている可能性
+- `id_` を vec_retriever 側 (TiDBVectorStore が割り当てた UUID) と一致させると `QueryFusionRetriever` が dedup する
+
+### ⑫ LM Studio に繋がらない (`ConnectionError`)
+- LM Studio で **OpenAI 互換サーバを Start** + `google/gemma-4-e2b` をロードしているか
+- `curl http://localhost:1234/v1/models` で `id: google/gemma-4-e2b` が返るか確認
+- ポート違い: 環境変数 `LMSTUDIO_BASE=http://localhost:NNNN/v1` で上書き
 
 ---
 
